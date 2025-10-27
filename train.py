@@ -48,6 +48,8 @@ dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
+
+# block_size = 512
 # model
 n_layer = 12
 n_head = 12
@@ -77,6 +79,11 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+
+device_name = 'cpu' if not torch.cuda.is_available() else torch.cuda.get_device_name(0).upper()
+print(f"device: {device_name}")
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -252,6 +259,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+start_time = time.time()
 while True:
 
     # determine and set the learning rate for this iteration
@@ -283,7 +291,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -332,5 +340,14 @@ while True:
     if iter_num > max_iters:
         break
 
+print(f"train cost:{time.time() - start_time}s")
 if ddp:
     destroy_process_group()
+
+"""
+baseline
+cost: 290.563236951828s
+mfu: 29%
+
+
+"""

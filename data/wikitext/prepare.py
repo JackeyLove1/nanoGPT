@@ -7,9 +7,13 @@ import os
 import pickle
 import numpy as np
 from datasets import load_dataset
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
+"""
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/root/autodl-tmp/hf
+"""
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.system("export HF_ENDPOINT=https://hf-mirror.com") # for CN region download
+os.system("export HF_HOME=/root/autodl-tmp/hf")
 # Import GPT-2 tokenizer
 try:
     import tiktoken
@@ -20,6 +24,8 @@ except ImportError:
 
 # Get the directory path
 data_dir = os.path.dirname(__file__)
+# dataset = "Salesforce/wikitext" ~ 200M
+dataset = "tiennv/english-wiki-corpus" #  ~1.41G
 
 # Initialize GPT-2 tokenizer
 print("Loading GPT-2 tokenizer...")
@@ -29,43 +35,102 @@ print(f"GPT-2 vocab size: {vocab_size}")
 
 # Download the WikiText-103-raw-v1 dataset
 print("\nLoading WikiText-103-raw-v1 dataset...")
-ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
+ds = load_dataset(dataset)
+
+# 检查数据集中可用的分割
+print("Available splits:", list(ds.keys()))
 
 # Combine train and validation data
 print("Combining train and validation splits...")
-train_text = '\n'.join(ds['train']['text'])
-val_text = '\n'.join(ds['validation']['text'])
+print("train: ", ds['train'])
 
-# Remove lines with only "= " headers (common in WikiText)
-train_text = '\n'.join([line for line in train_text.split('\n') if line.strip() and not line.strip().startswith('=')])
-val_text = '\n'.join([line for line in val_text.split('\n') if line.strip() and not line.strip().startswith('=')])
+# 检查是否存在validation分割，如果不存在，从train中分割
+if 'validation' not in ds:
+    print("⚠️ No 'validation' split found in dataset. Splitting train data (90% train, 10% val)...")
+    from datasets import DatasetDict, load_dataset
+    
+    # 从train分割出验证集
+    split_dataset = ds['train'].train_test_split(test_size=0.1, seed=42)
+    ds = DatasetDict({
+        'train': split_dataset['train'],
+        'validation': split_dataset['test']
+    })
+    print(f"Train split: {len(ds['train'])} samples")
+    print(f"Validation split: {len(ds['validation'])} samples")
 
-print(f"\nTrain text length: {len(train_text):,} characters")
-print(f"Val text length: {len(val_text):,} characters")
+# 使用流式处理避免OOM：分批处理、边读边tokenize、直接写入
+def stream_and_tokenize(split_name, batch_size=100000):
+    """
+    流式读取数据集，分批过滤和tokenize，返回token生成器
+    batch_size: 每次处理的样本数，调整此参数平衡内存和速度
+    """
+    dataset_split = ds[split_name]
+    total_samples = len(dataset_split)
+    
+    print(f"\n{split_name.upper()} Split: {total_samples:,} samples, processing in batches of {batch_size}...")
+    
+    for batch_start in range(0, total_samples, batch_size):
+        batch_end = min(batch_start + batch_size, total_samples)
+        batch_texts = dataset_split['text'][batch_start:batch_end]
+        
+        # 过滤并清理文本（逐条处理，避免拼接整个分割）
+        cleaned_texts = []
+        for text in batch_texts:
+            lines = text.split('\n')
+            # 移除只有"="的header行
+            cleaned_lines = [line for line in lines if line.strip() and not line.strip().startswith('=')]
+            if cleaned_lines:
+                cleaned_texts.append('\n'.join(cleaned_lines))
+        
+        # 合并此批次文本并tokenize
+        if cleaned_texts:
+            batch_text = '\n'.join(cleaned_texts)
+            batch_ids = enc.encode_ordinary(batch_text)
+            
+            for token_id in batch_ids:
+                yield token_id
+            
+            # 进度显示
+            if (batch_end - batch_start) % batch_size == 0 or batch_end == total_samples:
+                print(f"  Processed: {batch_end}/{total_samples} samples")
 
-# Tokenize using GPT-2 tokenizer
-print("\nTokenizing train split...")
-train_ids = enc.encode_ordinary(train_text)
-print(f"Train tokens: {len(train_ids):,}")
+# 使用生成器流式处理并直接保存到文件
+def save_tokens_streaming(split_name, output_path):
+    """
+    流式处理token生成器，直接写入numpy二进制文件
+    """
+    print(f"\nTokenizing and saving {split_name} split...")
+    
+    # 为了提高写入效率，我们分块缓存tokens
+    buffer = []
+    buffer_size = 100000  # 缓存10万个token后再写入
+    total_tokens = 0
+    
+    with open(output_path, 'wb') as f:
+        for token_id in stream_and_tokenize(split_name):
+            buffer.append(token_id)
+            total_tokens += 1
+            
+            # 缓冲区满则写入
+            if len(buffer) >= buffer_size:
+                token_array = np.array(buffer, dtype=np.uint16)
+                token_array.tofile(f)
+                buffer = []
+        
+        # 写入剩余tokens
+        if buffer:
+            token_array = np.array(buffer, dtype=np.uint16)
+            token_array.tofile(f)
+    
+    print(f"{split_name.upper()} tokens: {total_tokens:,}")
+    return total_tokens
 
-print("Tokenizing val split...")
-val_ids = enc.encode_ordinary(val_text)
-print(f"Val tokens: {len(val_ids):,}")
-
-# Convert to numpy arrays with uint16 dtype
-# (Note: uint16 can handle values up to 65535, GPT-2 vocab is 50257, so safe)
-train_ids = np.array(train_ids, dtype=np.uint16)
-val_ids = np.array(val_ids, dtype=np.uint16)
-
-# Save to binary files
-print("\nSaving to binary files...")
+# 处理train和val分割
 train_bin_path = os.path.join(data_dir, 'train.bin')
 val_bin_path = os.path.join(data_dir, 'val.bin')
 
-train_ids.tofile(train_bin_path)
-val_ids.tofile(val_bin_path)
-print(f"Train file: {train_bin_path} ({os.path.getsize(train_bin_path) / 1024 / 1024:.2f} MB)")
-print(f"Val file: {val_bin_path} ({os.path.getsize(val_bin_path) / 1024 / 1024:.2f} MB)")
+train_token_count = save_tokens_streaming('train', train_bin_path)
+val_token_count = save_tokens_streaming('validation', val_bin_path)
 
 # Save metadata
 # meta = {
@@ -79,4 +144,7 @@ print(f"Val file: {val_bin_path} ({os.path.getsize(val_bin_path) / 1024 / 1024:.
 # print(f"Metadata file: {meta_path}")
 
 print("\n✓ Data preparation with GPT-2 tokenizer completed successfully!")
-print(f"Compression ratio: 1 token ≈ {len(train_text) / len(train_ids):.2f} characters")
+print(f"Train file: {train_bin_path} ({os.path.getsize(train_bin_path) / 1024 / 1024:.2f} MB)")
+print(f"Val file: {val_bin_path} ({os.path.getsize(val_bin_path) / 1024 / 1024:.2f} MB)")
+print(f"Total tokens (train + val): {train_token_count + val_token_count:,}")
+print(f"Memory-efficient streaming processing completed! No OOM issues. ✓")

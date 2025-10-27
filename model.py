@@ -260,7 +260,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, optimizer_type='adamw'):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -277,12 +277,51 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        
+        # Create optimizer based on optimizer_type
+        optimizer_type = optimizer_type.lower()
+        print(f"using optimizer: {optimizer_type}")
+        
+        if optimizer_type == 'adamw':
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+            
+        elif optimizer_type == 'sgd':
+            # SGD with momentum (typically 0.9)
+            momentum = betas[0] if isinstance(betas, (tuple, list)) else 0.9
+            optimizer = torch.optim.SGD(optim_groups, lr=learning_rate, momentum=momentum, 
+                                       weight_decay=weight_decay, nesterov=True)
+            print(f"using SGD with momentum: {momentum}, nesterov: True")
+            
+        elif optimizer_type == 'adam':
+            # Standard Adam without weight decay decoupling
+            optimizer = torch.optim.Adam(optim_groups, lr=learning_rate, betas=betas)
+            print(f"using Adam with betas: {betas}")
+            
+        elif optimizer_type == 'lamb':
+            # LAMB (Layer-wise Adaptive Moments optimizer for Batch training)
+            try:
+                from torch.optim.lamb import Lamb
+                optimizer = Lamb(optim_groups, lr=learning_rate, betas=betas, weight_decay=weight_decay)
+                print(f"using LAMB with betas: {betas}")
+            except ImportError:
+                print("LAMB not available in this PyTorch version, falling back to AdamW")
+                fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+                use_fused = fused_available and device_type == 'cuda'
+                extra_args = dict(fused=True) if use_fused else dict()
+                optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+                
+        elif optimizer_type == 'rmsprop':
+            # RMSprop optimizer
+            optimizer = torch.optim.RMSprop(optim_groups, lr=learning_rate, weight_decay=weight_decay,
+                                           momentum=betas[0] if isinstance(betas, (tuple, list)) else 0.0)
+            print(f"using RMSprop")
+            
+        else:
+            raise ValueError(f"Unknown optimizer type: {optimizer_type}. Supported types: adamw, sgd, adam, lamb, rmsprop")
 
         return optimizer
 

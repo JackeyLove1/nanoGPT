@@ -16,7 +16,7 @@ class RMSNorm(nn.Module):
         return (x_f32 * rms * self.weight).type_as(x)
 
 
-class RMSNormTorh(nn.Module):
+class RMSNormTorch(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.rms_norm = nn.RMSNorm(dim)
